@@ -6,6 +6,7 @@ import { PulseMetricSubscription } from '../../../sdks/tableau/types/pulse.js';
 import { Server } from '../../../server.js';
 import { getTableauAuthInfo } from '../../../server/oauth/getTableauAuthInfo.js';
 import { getExceptionMessage } from '../../../utils/getExceptionMessage.js';
+import { getSiteLuidFromAccessToken } from '../../../utils/getSiteLuidFromAccessToken.js';
 import { RestApiArgs } from '../../resourceAccessChecker.js';
 import { ConstrainedResult, Tool } from '../../tool.js';
 import { getPulseDisabledError } from '../getPulseDisabledError.js';
@@ -19,7 +20,7 @@ export const getListPulseMetricSubscriptionsTool = (server: Server): Tool<typeof
     description: `
 Retrieves a list of published Pulse Metric Subscriptions for the current user using the Tableau REST API.  Use this tool when a user requests to list Tableau Pulse Metric Subscriptions for the current user.
 
-**Example Usage:**  
+**Example Usage:**
 - List all Pulse Metric Subscriptions for the current user on the current site
 - List all of my Pulse Metric Subscriptions
 
@@ -34,10 +35,11 @@ Retrieves a list of published Pulse Metric Subscriptions for the current user us
       readOnlyHint: true,
       openWorldHint: false,
     },
-    callback: async (_, { requestId, authInfo }): Promise<CallToolResult> => {
+    callback: async (_, { requestId, sessionId, authInfo, signal }): Promise<CallToolResult> => {
       const config = getConfig();
       return await listPulseMetricSubscriptionsTool.logAndExecute({
         requestId,
+        sessionId,
         authInfo,
         args: {},
         callback: async () => {
@@ -46,6 +48,7 @@ Retrieves a list of published Pulse Metric Subscriptions for the current user us
             requestId,
             server,
             jwtScopes: ['tableau:metric_subscriptions:read'],
+            signal,
             authInfo: getTableauAuthInfo(authInfo),
             callback: async (restApi) => {
               return await restApi.pulseMethods.listPulseMetricSubscriptionsForCurrentUser();
@@ -56,10 +59,16 @@ Retrieves a list of published Pulse Metric Subscriptions for the current user us
           return await constrainPulseMetricSubscriptions({
             subscriptions,
             boundedContext: config.boundedContext,
-            restApiArgs: { config, requestId, server },
+            restApiArgs: { config, requestId, server, signal },
           });
         },
         getErrorText: getPulseDisabledError,
+        productTelemetryBase: {
+          endpoint: config.productTelemetryEndpoint,
+          siteLuid: getSiteLuidFromAccessToken(getTableauAuthInfo(authInfo)?.accessToken),
+          podName: config.server,
+          enabled: config.productTelemetryEnabled,
+        },
       });
     },
   });
@@ -94,13 +103,14 @@ export async function constrainPulseMetricSubscriptions({
     };
   }
 
-  const { config, requestId, server } = restApiArgs;
+  const { config, requestId, server, signal } = restApiArgs;
   try {
     const metricsResult = await useRestApi({
       config,
       requestId,
       server,
       jwtScopes: ['tableau:insight_metrics:read'],
+      signal,
       callback: async (restApi) => {
         return await restApi.pulseMethods.listPulseMetricsFromMetricIds(
           subscriptions.map((subscription) => subscription.metric_id),
@@ -116,6 +126,7 @@ export async function constrainPulseMetricSubscriptions({
           'While Pulse Metric Subscriptions were found, an error occurred while retrieving information about them to determine if they are allowed to be viewed.',
           getExceptionMessage(metricsResult.error),
         ].join(' '),
+        error: metricsResult.error,
       };
     }
 
@@ -151,6 +162,7 @@ export async function constrainPulseMetricSubscriptions({
         'While Pulse Metric Subscriptions were found, an error occurred while retrieving information about them to determine if they are allowed to be viewed.',
         getExceptionMessage(error),
       ].join(' '),
+      error: error instanceof Error ? error : undefined,
     };
   }
 }

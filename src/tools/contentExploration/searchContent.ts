@@ -10,6 +10,7 @@ import {
 } from '../../sdks/tableau/types/contentExploration.js';
 import { Server } from '../../server.js';
 import { getTableauAuthInfo } from '../../server/oauth/getTableauAuthInfo.js';
+import { getSiteLuidFromAccessToken } from '../../utils/getSiteLuidFromAccessToken.js';
 import { Tool } from '../tool.js';
 import {
   buildFilterString,
@@ -50,7 +51,7 @@ This tool searches across all supported content types for objects relevant to th
   - \`hitsMediumSpanTotal\`: Number of times a content item was viewed in the last 3 months
   - \`hitsLargeSpanTotal\`: Number of times a content item was viewed in the last year
   - \`downstreamWorkbookCount\`: Number of workbooks in a given project. This value is only available when the content type filter includes 'database' or 'table'
-  
+
   For each sort method, you can specify a sort direction: 'asc' for ascending or 'desc' for descending (default: 'asc'). The orderBy parameter is an array of objects containing the sorting method and direction. The first element determines primary sorting, with subsequent elements used as tiebreakers.
 
 **Important Notes:**
@@ -63,13 +64,14 @@ This tool searches across all supported content types for objects relevant to th
     },
     callback: async (
       { terms, limit, orderBy, filter },
-      { requestId, authInfo },
+      { requestId, sessionId, authInfo, signal },
     ): Promise<CallToolResult> => {
       const config = getConfig();
       const orderByString = orderBy ? buildOrderByString(orderBy) : undefined;
       const filterString = filter ? buildFilterString(filter) : undefined;
       return await searchContentTool.logAndExecute<Array<ReducedSearchContentResponse>>({
         requestId,
+        sessionId,
         authInfo,
         args: {},
         callback: async () => {
@@ -79,14 +81,14 @@ This tool searches across all supported content types for objects relevant to th
               requestId,
               server,
               jwtScopes: ['tableau:content:read'],
+              signal,
               authInfo: getTableauAuthInfo(authInfo),
               callback: async (restApi) => {
+                const maxResultLimit = config.getMaxResultLimit(searchContentTool.name);
                 const response = await restApi.contentExplorationMethods.searchContent({
                   terms,
                   page: 0,
-                  limit: config.maxResultLimit
-                    ? Math.min(config.maxResultLimit, limit ?? 100)
-                    : (limit ?? 100),
+                  limit: maxResultLimit ? Math.min(maxResultLimit, limit ?? 100) : (limit ?? 100),
                   orderBy: orderByString,
                   filter: filterString,
                 });
@@ -97,6 +99,12 @@ This tool searches across all supported content types for objects relevant to th
         },
         constrainSuccessResult: (items) =>
           constrainSearchContent({ items, boundedContext: config.boundedContext }),
+        productTelemetryBase: {
+          endpoint: config.productTelemetryEndpoint,
+          siteLuid: getSiteLuidFromAccessToken(getTableauAuthInfo(authInfo)?.accessToken),
+          podName: config.server,
+          enabled: config.productTelemetryEnabled,
+        },
       });
     },
   });

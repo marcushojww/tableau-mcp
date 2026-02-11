@@ -14,6 +14,7 @@ import {
 import { Server } from '../../server.js';
 import { getTableauAuthInfo } from '../../server/oauth/getTableauAuthInfo.js';
 import { TableauAuthInfo } from '../../server/oauth/schemas.js';
+import { getSiteLuidFromAccessToken } from '../../utils/getSiteLuidFromAccessToken.js';
 import { getResultForTableauVersion } from '../../utils/isTableauVersionAtLeast.js';
 import { Provider } from '../../utils/provider.js';
 import { getVizqlDataServiceDisabledError } from '../getVizqlDataServiceDisabledError.js';
@@ -30,6 +31,7 @@ import { validateQueryAgainstDatasourceMetadata } from './validators/validateQue
 const paramsSchema = {
   datasourceLuid: z.string().nonempty(),
   query: querySchema,
+  limit: z.number().int().min(1).optional(),
 };
 
 export type QueryDatasourceError =
@@ -76,17 +78,18 @@ export const getQueryDatasourceTool = (
     },
     argsValidator: validateQuery,
     callback: async (
-      { datasourceLuid, query },
-      { requestId, authInfo },
+      { datasourceLuid, query, limit },
+      { requestId, sessionId, authInfo, signal },
     ): Promise<CallToolResult> => {
       return await queryDatasourceTool.logAndExecute<QueryOutput, QueryDatasourceError>({
         requestId,
+        sessionId,
         authInfo,
         args: { datasourceLuid, query },
         callback: async () => {
           const isDatasourceAllowedResult = await resourceAccessChecker.isDatasourceAllowed({
             datasourceLuid,
-            restApiArgs: { config, requestId, server },
+            restApiArgs: { config, requestId, server, signal },
           });
 
           if (!isDatasourceAllowedResult.allowed) {
@@ -97,11 +100,27 @@ export const getQueryDatasourceTool = (
           }
 
           const datasource: Datasource = { datasourceLuid };
-          const options = {
-            returnFormat: 'OBJECTS',
-            debug: true,
-            disaggregate: false,
-          } as const;
+          const maxResultLimit = config.getMaxResultLimit(queryDatasourceTool.name);
+          const rowLimit = maxResultLimit
+            ? Math.min(maxResultLimit, limit ?? Number.MAX_SAFE_INTEGER)
+            : limit;
+
+          const options = await getResultForTableauVersion({
+            server: config.server || getTableauAuthInfo(authInfo)?.server,
+            mappings: {
+              '2026.1.0': {
+                returnFormat: 'OBJECTS',
+                debug: true,
+                disaggregate: false,
+                rowLimit, // rowLimit can only be provided in 2026.1.0 and later
+              } as const,
+              default: {
+                returnFormat: 'OBJECTS',
+                debug: true,
+                disaggregate: false,
+              } as const,
+            },
+          });
 
           const credentials = getDatasourceCredentials(datasourceLuid);
           if (credentials) {
@@ -119,6 +138,7 @@ export const getQueryDatasourceTool = (
             requestId,
             server,
             jwtScopes: ['tableau:viz_data_service:read'],
+            signal,
             authInfo: getTableauAuthInfo(authInfo),
             callback: async (restApi) => {
               if (!config.disableQueryDatasourceValidationRequests) {
@@ -169,6 +189,11 @@ export const getQueryDatasourceTool = (
                         },
                 );
               }
+
+              if (rowLimit && result.value.data && result.value.data.length > rowLimit) {
+                result.value.data.length = rowLimit;
+              }
+
               return result;
             },
           });
@@ -197,6 +222,12 @@ export const getQueryDatasourceTool = (
                 ...handleQueryDatasourceError(error.error),
               });
           }
+        },
+        productTelemetryBase: {
+          endpoint: config.productTelemetryEndpoint,
+          siteLuid: getSiteLuidFromAccessToken(getTableauAuthInfo(authInfo)?.accessToken),
+          podName: config.server,
+          enabled: config.productTelemetryEnabled,
         },
       });
     },

@@ -7,6 +7,7 @@ import { useRestApi } from '../../restApiInstance.js';
 import { DataSource } from '../../sdks/tableau/types/dataSource.js';
 import { Server } from '../../server.js';
 import { getTableauAuthInfo } from '../../server/oauth/getTableauAuthInfo.js';
+import { getSiteLuidFromAccessToken } from '../../utils/getSiteLuidFromAccessToken.js';
 import { paginate } from '../../utils/paginate.js';
 import { genericFilterDescription } from '../genericFilterDescription.js';
 import { ConstrainedResult, Tool } from '../tool.js';
@@ -24,7 +25,7 @@ export const getListDatasourcesTool = (server: Server): Tool<typeof paramsSchema
     name: 'list-datasources',
     description: `
   Retrieves a list of published data sources from a specified Tableau site using the Tableau REST API. Supports optional filtering via field:operator:value expressions (e.g., name:eq:Views) for precise and flexible data source discovery. Use this tool when a user requests to list, search, or filter Tableau data sources on a site.
-  
+
   **Supported Filter Fields and Operators**
   | Field                  | Operators                                 |
   |------------------------|-------------------------------------------|
@@ -58,9 +59,9 @@ export const getListDatasourcesTool = (server: Server): Tool<typeof paramsSchema
   | tags                   | eq, in                                    |
   | type                   | eq                                        |
   | updatedAt              | eq, gt, gte, lt, lte                      |
-  
+
   ${genericFilterDescription}
-  
+
   **Example Usage:**
   - List all data sources on a site
   - List data sources with the name "Project Views":
@@ -80,12 +81,13 @@ export const getListDatasourcesTool = (server: Server): Tool<typeof paramsSchema
     },
     callback: async (
       { filter, pageSize, limit },
-      { requestId, authInfo },
+      { requestId, authInfo, sessionId, signal },
     ): Promise<CallToolResult> => {
       const config = getConfig();
       const validatedFilter = filter ? parseAndValidateDatasourcesFilterString(filter) : undefined;
       return await listDatasourcesTool.logAndExecute({
         requestId,
+        sessionId,
         authInfo,
         args: { filter, pageSize, limit },
         callback: async () => {
@@ -94,13 +96,15 @@ export const getListDatasourcesTool = (server: Server): Tool<typeof paramsSchema
             requestId,
             server,
             jwtScopes: ['tableau:content:read'],
+            signal,
             authInfo: getTableauAuthInfo(authInfo),
             callback: async (restApi) => {
+              const maxResultLimit = config.getMaxResultLimit(listDatasourcesTool.name);
               const datasources = await paginate({
                 pageConfig: {
                   pageSize,
-                  limit: config.maxResultLimit
-                    ? Math.min(config.maxResultLimit, limit ?? Number.MAX_SAFE_INTEGER)
+                  limit: maxResultLimit
+                    ? Math.min(maxResultLimit, limit ?? Number.MAX_SAFE_INTEGER)
                     : limit,
                 },
                 getDataFn: async (pageConfig) => {
@@ -124,6 +128,12 @@ export const getListDatasourcesTool = (server: Server): Tool<typeof paramsSchema
         },
         constrainSuccessResult: (datasources) =>
           constrainDatasources({ datasources, boundedContext: config.boundedContext }),
+        productTelemetryBase: {
+          endpoint: config.productTelemetryEndpoint,
+          siteLuid: getSiteLuidFromAccessToken(getTableauAuthInfo(authInfo)?.accessToken),
+          podName: config.server,
+          enabled: config.productTelemetryEnabled,
+        },
       });
     },
   });
@@ -146,13 +156,19 @@ export function constrainDatasources({
     };
   }
 
-  const { projectIds, datasourceIds } = boundedContext;
+  const { projectIds, datasourceIds, tags } = boundedContext;
   if (projectIds) {
     datasources = datasources.filter((datasource) => projectIds.has(datasource.project.id));
   }
 
   if (datasourceIds) {
     datasources = datasources.filter((datasource) => datasourceIds.has(datasource.id));
+  }
+
+  if (tags) {
+    datasources = datasources.filter((datasource) =>
+      datasource.tags.tag?.some((tag) => tags.has(tag.label)),
+    );
   }
 
   if (datasources.length === 0) {

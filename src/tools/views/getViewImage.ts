@@ -6,6 +6,7 @@ import { getConfig } from '../../config.js';
 import { useRestApi } from '../../restApiInstance.js';
 import { Server } from '../../server.js';
 import { getTableauAuthInfo } from '../../server/oauth/getTableauAuthInfo.js';
+import { getSiteLuidFromAccessToken } from '../../utils/getSiteLuidFromAccessToken.js';
 import { convertPngDataToToolResult } from '../convertPngDataToToolResult.js';
 import { resourceAccessChecker } from '../resourceAccessChecker.js';
 import { Tool } from '../tool.js';
@@ -35,18 +36,19 @@ export const getGetViewImageTool = (server: Server): Tool<typeof paramsSchema> =
     },
     callback: async (
       { viewId, width, height },
-      { requestId, authInfo },
+      { requestId, sessionId, authInfo, signal },
     ): Promise<CallToolResult> => {
       const config = getConfig();
 
       return await getViewImageTool.logAndExecute<string, GetViewImageError>({
         requestId,
+        sessionId,
         authInfo,
         args: { viewId },
         callback: async () => {
           const isViewAllowedResult = await resourceAccessChecker.isViewAllowed({
             viewId,
-            restApiArgs: { config, requestId, server },
+            restApiArgs: { config, requestId, server, signal },
           });
 
           if (!isViewAllowedResult.allowed) {
@@ -62,6 +64,7 @@ export const getGetViewImageTool = (server: Server): Tool<typeof paramsSchema> =
               requestId,
               server,
               jwtScopes: ['tableau:views:download'],
+              signal,
               authInfo: getTableauAuthInfo(authInfo),
               callback: async (restApi) => {
                 return await restApi.viewsMethods.queryViewImage({
@@ -87,6 +90,12 @@ export const getGetViewImageTool = (server: Server): Tool<typeof paramsSchema> =
             case 'view-not-allowed':
               return error.message;
           }
+        },
+        productTelemetryBase: {
+          endpoint: config.productTelemetryEndpoint,
+          siteLuid: getSiteLuidFromAccessToken(getTableauAuthInfo(authInfo)?.accessToken),
+          podName: config.server,
+          enabled: config.productTelemetryEnabled,
         },
       });
     },

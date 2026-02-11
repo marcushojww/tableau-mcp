@@ -2,6 +2,7 @@ import { CorsOptions } from 'cors';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 
+import { isTelemetryProvider, providerConfigSchema, TelemetryConfig } from './telemetry/types.js';
 import { isToolGroupName, isToolName, toolGroups, ToolName } from './tools/toolName.js';
 import { isTransport, TransportName } from './transports.js';
 import { getDirname } from './utils/getDirname.js';
@@ -26,9 +27,13 @@ export type BoundedContext = {
   projectIds: Set<string> | null;
   datasourceIds: Set<string> | null;
   workbookIds: Set<string> | null;
+  tags: Set<string> | null;
 };
 
 export class Config {
+  private maxResultLimit: number | null;
+  private maxResultLimits: Map<ToolName, number | null> | null;
+
   auth: AuthType;
   server: string;
   transport: TransportName;
@@ -55,7 +60,7 @@ export class Config {
   disableLogMasking: boolean;
   includeTools: Array<ToolName>;
   excludeTools: Array<ToolName>;
-  maxResultLimit: number | null;
+  maxRequestTimeoutMs: number;
   disableQueryDatasourceValidationRequests: boolean;
   disableMetadataApiRequests: boolean;
   disableSessionManagement: boolean;
@@ -67,6 +72,7 @@ export class Config {
     enabled: boolean;
     issuer: string;
     redirectUri: string;
+    lockSite: boolean;
     jwePrivateKey: string;
     jwePrivateKeyPath: string;
     jwePrivateKeyPassphrase: string | undefined;
@@ -76,6 +82,13 @@ export class Config {
     clientIdSecretPairs: Record<string, string> | null;
     dnsServers: string[];
   };
+  telemetry: TelemetryConfig;
+  productTelemetryEndpoint: string;
+  productTelemetryEnabled: boolean;
+
+  getMaxResultLimit(toolName: ToolName): number | null {
+    return this.maxResultLimits?.get(toolName) ?? this.maxResultLimit;
+  }
 
   constructor() {
     const cleansedVars = removeClaudeMcpBundleUserConfigTemplates(process.env);
@@ -108,7 +121,9 @@ export class Config {
       DISABLE_LOG_MASKING: disableLogMasking,
       INCLUDE_TOOLS: includeTools,
       EXCLUDE_TOOLS: excludeTools,
+      MAX_REQUEST_TIMEOUT_MS: maxRequestTimeoutMs,
       MAX_RESULT_LIMIT: maxResultLimit,
+      MAX_RESULT_LIMITS: maxResultLimits,
       DISABLE_QUERY_DATASOURCE_VALIDATION_REQUESTS: disableQueryDatasourceValidationRequests,
       DISABLE_METADATA_API_REQUESTS: disableMetadataApiRequests,
       DISABLE_SESSION_MANAGEMENT: disableSessionManagement,
@@ -117,9 +132,11 @@ export class Config {
       INCLUDE_PROJECT_IDS: includeProjectIds,
       INCLUDE_DATASOURCE_IDS: includeDatasourceIds,
       INCLUDE_WORKBOOK_IDS: includeWorkbookIds,
+      INCLUDE_TAGS: includeTags,
       TABLEAU_SERVER_VERSION_CHECK_INTERVAL_IN_HOURS: tableauServerVersionCheckIntervalInHours,
       DANGEROUSLY_DISABLE_OAUTH: disableOauth,
       OAUTH_ISSUER: oauthIssuer,
+      OAUTH_LOCK_SITE: oauthLockSite,
       OAUTH_JWE_PRIVATE_KEY: oauthJwePrivateKey,
       OAUTH_JWE_PRIVATE_KEY_PATH: oauthJwePrivateKeyPath,
       OAUTH_JWE_PRIVATE_KEY_PASSPHRASE: oauthJwePrivateKeyPassphrase,
@@ -129,6 +146,10 @@ export class Config {
       OAUTH_AUTHORIZATION_CODE_TIMEOUT_MS: authzCodeTimeoutMs,
       OAUTH_ACCESS_TOKEN_TIMEOUT_MS: accessTokenTimeoutMs,
       OAUTH_REFRESH_TOKEN_TIMEOUT_MS: refreshTokenTimeoutMs,
+      TELEMETRY_PROVIDER: telemetryProvider,
+      TELEMETRY_PROVIDER_CONFIG: telemetryProviderConfig,
+      PRODUCT_TELEMETRY_ENDPOINT: productTelemetryEndpoint,
+      PRODUCT_TELEMETRY_ENABLED: productTelemetryEnabled,
     } = cleansedVars;
 
     let jwtUsername = '';
@@ -157,6 +178,7 @@ export class Config {
       projectIds: createSetFromCommaSeparatedString(includeProjectIds),
       datasourceIds: createSetFromCommaSeparatedString(includeDatasourceIds),
       workbookIds: createSetFromCommaSeparatedString(includeWorkbookIds),
+      tags: createSetFromCommaSeparatedString(includeTags),
     };
 
     if (this.boundedContext.projectIds?.size === 0) {
@@ -177,6 +199,12 @@ export class Config {
       );
     }
 
+    if (this.boundedContext.tags?.size === 0) {
+      throw new Error(
+        'When set, the environment variable INCLUDE_TAGS must have at least one value',
+      );
+    }
+
     this.tableauServerVersionCheckIntervalInHours = parseNumber(
       tableauServerVersionCheckIntervalInHours,
       {
@@ -191,6 +219,7 @@ export class Config {
       enabled: disableOauthOverride ? false : !!oauthIssuer,
       issuer: oauthIssuer ?? '',
       redirectUri: redirectUri || (oauthIssuer ? `${oauthIssuer}/Callback` : ''),
+      lockSite: oauthLockSite !== 'false', // Site locking is enabled by default
       jwePrivateKey: oauthJwePrivateKey ?? '',
       jwePrivateKeyPath: oauthJwePrivateKeyPath ?? '',
       jwePrivateKeyPassphrase: oauthJwePrivateKeyPassphrase || undefined,
@@ -222,6 +251,27 @@ export class Config {
           }, {})
         : null,
     };
+
+    const parsedProvider = isTelemetryProvider(telemetryProvider) ? telemetryProvider : 'noop';
+    if (parsedProvider === 'custom') {
+      if (!telemetryProviderConfig) {
+        throw new Error(
+          'TELEMETRY_PROVIDER_CONFIG is required when TELEMETRY_PROVIDER is "custom"',
+        );
+      }
+      this.telemetry = {
+        provider: 'custom',
+        providerConfig: providerConfigSchema.parse(JSON.parse(telemetryProviderConfig)),
+      };
+    } else {
+      this.telemetry = {
+        provider: 'noop',
+      };
+    }
+
+    this.productTelemetryEndpoint =
+      productTelemetryEndpoint || 'https://prod.telemetry.tableausoftware.com';
+    this.productTelemetryEnabled = productTelemetryEnabled !== 'false';
 
     this.auth = isAuthType(auth) ? auth : this.oauth.enabled ? 'oauth' : 'pat';
     this.transport = isTransport(transport) ? transport : this.oauth.enabled ? 'http' : 'stdio';
@@ -275,9 +325,17 @@ export class Config {
       }
     }
 
+    this.maxRequestTimeoutMs = parseNumber(maxRequestTimeoutMs, {
+      defaultValue: TEN_MINUTES_IN_MS,
+      minValue: 5000,
+      maxValue: ONE_HOUR_IN_MS,
+    });
+
     const maxResultLimitNumber = maxResultLimit ? parseInt(maxResultLimit) : NaN;
     this.maxResultLimit =
       isNaN(maxResultLimitNumber) || maxResultLimitNumber <= 0 ? null : maxResultLimitNumber;
+
+    this.maxResultLimits = maxResultLimits ? getMaxResultLimits(maxResultLimits) : null;
 
     this.includeTools = includeTools
       ? includeTools.split(',').flatMap((s) => {
@@ -452,6 +510,32 @@ function removeClaudeMcpBundleUserConfigTemplates(
     }
     return acc;
   }, {});
+}
+
+function getMaxResultLimits(maxResultLimits: string): Map<ToolName, number | null> {
+  const map = new Map<ToolName, number | null>();
+  if (!maxResultLimits) {
+    return map;
+  }
+
+  maxResultLimits.split(',').forEach((curr) => {
+    const [toolName, maxResultLimit] = curr.split(':');
+    const maxResultLimitNumber = maxResultLimit ? parseInt(maxResultLimit) : NaN;
+    const actualLimit =
+      isNaN(maxResultLimitNumber) || maxResultLimitNumber <= 0 ? null : maxResultLimitNumber;
+    if (isToolName(toolName)) {
+      map.set(toolName, actualLimit);
+    } else if (isToolGroupName(toolName)) {
+      toolGroups[toolName].forEach((toolName) => {
+        if (!map.has(toolName)) {
+          // Tool names take precedence over group names
+          map.set(toolName, actualLimit);
+        }
+      });
+    }
+  });
+
+  return map;
 }
 
 function parseNumber(

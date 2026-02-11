@@ -12,6 +12,7 @@ import {
 } from '../../../sdks/tableau/types/pulse.js';
 import { Server } from '../../../server.js';
 import { getTableauAuthInfo } from '../../../server/oauth/getTableauAuthInfo.js';
+import { getSiteLuidFromAccessToken } from '../../../utils/getSiteLuidFromAccessToken.js';
 import { Tool } from '../../tool.js';
 import { getPulseDisabledError } from '../getPulseDisabledError.js';
 
@@ -76,7 +77,7 @@ Generate an insight bundle for the current aggregated value for Pulse Metric usi
               basic_specification: {
                 measure: {
                   field: 'Sales',
-                  aggregation: 'AGGREGATION_SUM', 
+                  aggregation: 'AGGREGATION_SUM',
                 },
                 time_dimension: {
                   field: 'Order Date',
@@ -152,7 +153,7 @@ Generate an insight bundle for the current aggregated value for Pulse Metric usi
     },
     callback: async (
       { bundleRequest, bundleType },
-      { requestId, authInfo },
+      { requestId, sessionId, authInfo, signal },
     ): Promise<CallToolResult> => {
       const config = getConfig();
       return await generatePulseMetricValueInsightBundleTool.logAndExecute<
@@ -160,6 +161,7 @@ Generate an insight bundle for the current aggregated value for Pulse Metric usi
         GeneratePulseMetricValueInsightBundleError
       >({
         requestId,
+        sessionId,
         authInfo,
         args: { bundleRequest, bundleType },
         callback: async () => {
@@ -185,6 +187,7 @@ Generate an insight bundle for the current aggregated value for Pulse Metric usi
             requestId,
             server,
             jwtScopes: ['tableau:insights:read'],
+            signal,
             authInfo: getTableauAuthInfo(authInfo),
             callback: async (restApi) =>
               await restApi.pulseMethods.generatePulseMetricValueInsightBundle(
@@ -215,6 +218,12 @@ Generate an insight bundle for the current aggregated value for Pulse Metric usi
             case 'datasource-not-allowed':
               return error.message;
           }
+        },
+        productTelemetryBase: {
+          endpoint: config.productTelemetryEndpoint,
+          siteLuid: getSiteLuidFromAccessToken(getTableauAuthInfo(authInfo)?.accessToken),
+          podName: config.server,
+          enabled: config.productTelemetryEnabled,
         },
       });
     },

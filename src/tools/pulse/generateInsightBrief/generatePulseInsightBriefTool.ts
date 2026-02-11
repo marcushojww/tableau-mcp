@@ -10,6 +10,7 @@ import {
 } from '../../../sdks/tableau/types/pulse.js';
 import { Server } from '../../../server.js';
 import { getTableauAuthInfo } from '../../../server/oauth/getTableauAuthInfo.js';
+import { getSiteLuidFromAccessToken } from '../../../utils/getSiteLuidFromAccessToken.js';
 import { Tool } from '../../tool.js';
 import { getPulseDisabledError } from '../getPulseDisabledError.js';
 
@@ -59,7 +60,7 @@ An insight brief is an AI-generated response to questions about Pulse metrics. I
    - \`insights_options.settings\` with all insight types and their enabled/disabled state
    - Incomplete data will cause API errors even if it passes schema validation
 
-3. **Multi-Turn Conversations**: To enable follow-up questions and conversational analysis, include the full conversation 
+3. **Multi-Turn Conversations**: To enable follow-up questions and conversational analysis, include the full conversation
    history in the \`messages\` array:
    - Add the initial user question with \`role: 'ROLE_USER'\`
    - Add the assistant's response with \`role: 'ROLE_ASSISTANT'\` and \`content\` containing the previous response text
@@ -192,13 +193,17 @@ An insight brief is an AI-generated response to questions about Pulse metrics. I
       readOnlyHint: true,
       openWorldHint: false,
     },
-    callback: async ({ briefRequest }, { requestId, authInfo }): Promise<CallToolResult> => {
+    callback: async (
+      { briefRequest },
+      { requestId, sessionId, authInfo, signal },
+    ): Promise<CallToolResult> => {
       const config = getConfig();
       return await generatePulseInsightBriefTool.logAndExecute<
         PulseInsightBriefResponse,
         GeneratePulseInsightBriefError
       >({
         requestId,
+        sessionId,
         authInfo,
         args: { briefRequest },
         callback: async () => {
@@ -231,6 +236,7 @@ An insight brief is an AI-generated response to questions about Pulse metrics. I
             requestId,
             server,
             jwtScopes: ['tableau:insight_brief:create'],
+            signal,
             authInfo: getTableauAuthInfo(authInfo),
             callback: async (restApi) =>
               await restApi.pulseMethods.generatePulseInsightBrief(briefRequest),
@@ -258,6 +264,12 @@ An insight brief is an AI-generated response to questions about Pulse metrics. I
             case 'datasource-not-allowed':
               return error.message;
           }
+        },
+        productTelemetryBase: {
+          endpoint: config.productTelemetryEndpoint,
+          siteLuid: getSiteLuidFromAccessToken(getTableauAuthInfo(authInfo)?.accessToken),
+          podName: config.server,
+          enabled: config.productTelemetryEnabled,
         },
       });
     },

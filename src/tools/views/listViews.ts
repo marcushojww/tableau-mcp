@@ -7,6 +7,7 @@ import { useRestApi } from '../../restApiInstance.js';
 import { View } from '../../sdks/tableau/types/view.js';
 import { Server } from '../../server.js';
 import { getTableauAuthInfo } from '../../server/oauth/getTableauAuthInfo.js';
+import { getSiteLuidFromAccessToken } from '../../utils/getSiteLuidFromAccessToken.js';
 import { paginate } from '../../utils/paginate.js';
 import { genericFilterDescription } from '../genericFilterDescription.js';
 import { ConstrainedResult, Tool } from '../tool.js';
@@ -49,7 +50,7 @@ export const getListViewsTool = (server: Server): Tool<typeof paramsSchema> => {
   | workbookName        | eq, in               |
 
   ${genericFilterDescription}
-  
+
   **Example Usage:**
   - List all views on a site
   - List views with the name "Overview":
@@ -68,13 +69,14 @@ export const getListViewsTool = (server: Server): Tool<typeof paramsSchema> => {
     },
     callback: async (
       { filter, pageSize, limit },
-      { requestId, authInfo },
+      { requestId, sessionId, authInfo, signal },
     ): Promise<CallToolResult> => {
       const config = getConfig();
       const validatedFilter = filter ? parseAndValidateViewsFilterString(filter) : undefined;
 
       return await listViewsTool.logAndExecute({
         requestId,
+        sessionId,
         authInfo,
         args: {},
         callback: async () => {
@@ -84,13 +86,15 @@ export const getListViewsTool = (server: Server): Tool<typeof paramsSchema> => {
               requestId,
               server,
               jwtScopes: ['tableau:content:read'],
+              signal,
               authInfo: getTableauAuthInfo(authInfo),
               callback: async (restApi) => {
+                const maxResultLimit = config.getMaxResultLimit(listViewsTool.name);
                 const views = await paginate({
                   pageConfig: {
                     pageSize,
-                    limit: config.maxResultLimit
-                      ? Math.min(config.maxResultLimit, limit ?? Number.MAX_SAFE_INTEGER)
+                    limit: maxResultLimit
+                      ? Math.min(maxResultLimit, limit ?? Number.MAX_SAFE_INTEGER)
                       : limit,
                   },
                   getDataFn: async (pageConfig) => {
@@ -114,6 +118,12 @@ export const getListViewsTool = (server: Server): Tool<typeof paramsSchema> => {
         },
         constrainSuccessResult: (views) =>
           constrainViews({ views, boundedContext: config.boundedContext }),
+        productTelemetryBase: {
+          endpoint: config.productTelemetryEndpoint,
+          siteLuid: getSiteLuidFromAccessToken(getTableauAuthInfo(authInfo)?.accessToken),
+          podName: config.server,
+          enabled: config.productTelemetryEnabled,
+        },
       });
     },
   });
@@ -135,13 +145,17 @@ export function constrainViews({
     };
   }
 
-  const { projectIds, workbookIds } = boundedContext;
+  const { projectIds, workbookIds, tags } = boundedContext;
   if (projectIds) {
     views = views.filter((view) => (view.project?.id ? projectIds.has(view.project.id) : false));
   }
 
   if (workbookIds) {
     views = views.filter((view) => (view.workbook?.id ? workbookIds.has(view.workbook.id) : false));
+  }
+
+  if (tags) {
+    views = views.filter((view) => view.tags?.tag?.some((tag) => tags.has(tag.label)));
   }
 
   if (views.length === 0) {

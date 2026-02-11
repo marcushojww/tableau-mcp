@@ -6,6 +6,7 @@ import { useRestApi } from '../../../restApiInstance.js';
 import { pulseMetricDefinitionViewEnum } from '../../../sdks/tableau/types/pulse.js';
 import { Server } from '../../../server.js';
 import { getTableauAuthInfo } from '../../../server/oauth/getTableauAuthInfo.js';
+import { getSiteLuidFromAccessToken } from '../../../utils/getSiteLuidFromAccessToken.js';
 import { Tool } from '../../tool.js';
 import { constrainPulseDefinitions } from '../constrainPulseDefinitions.js';
 import { getPulseDisabledError } from '../getPulseDisabledError.js';
@@ -59,11 +60,12 @@ Retrieves a list of specific Pulse Metric Definitions using the Tableau REST API
     },
     callback: async (
       { view, metricDefinitionIds },
-      { requestId, authInfo },
+      { requestId, sessionId, authInfo, signal },
     ): Promise<CallToolResult> => {
       const config = getConfig();
       return await listPulseMetricDefinitionsFromDefinitionIdsTool.logAndExecute({
         requestId,
+        sessionId,
         authInfo,
         args: { metricDefinitionIds, view },
         callback: async () => {
@@ -72,6 +74,7 @@ Retrieves a list of specific Pulse Metric Definitions using the Tableau REST API
             requestId,
             server,
             jwtScopes: ['tableau:insight_definitions_metrics:read'],
+            signal,
             authInfo: getTableauAuthInfo(authInfo),
             callback: async (restApi) => {
               return await restApi.pulseMethods.listPulseMetricDefinitionsFromMetricDefinitionIds(
@@ -84,6 +87,12 @@ Retrieves a list of specific Pulse Metric Definitions using the Tableau REST API
         constrainSuccessResult: (definitions) =>
           constrainPulseDefinitions({ definitions, boundedContext: config.boundedContext }),
         getErrorText: getPulseDisabledError,
+        productTelemetryBase: {
+          endpoint: config.productTelemetryEndpoint,
+          siteLuid: getSiteLuidFromAccessToken(getTableauAuthInfo(authInfo)?.accessToken),
+          podName: config.server,
+          enabled: config.productTelemetryEnabled,
+        },
       });
     },
   });

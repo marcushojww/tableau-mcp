@@ -1,6 +1,8 @@
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 import { Server } from '../../server.js';
+import { stubDefaultEnvVars } from '../../testShared.js';
+import invariant from '../../utils/invariant.js';
 import { Provider } from '../../utils/provider.js';
 import { exportedForTesting as resourceAccessCheckerExportedForTesting } from '../resourceAccessChecker.js';
 import { getGetViewDataTool as getGetViewDataTool } from './getViewData.js';
@@ -14,7 +16,6 @@ const mockViewData =
 const mocks = vi.hoisted(() => ({
   mockGetView: vi.fn(),
   mockQueryViewData: vi.fn(),
-  mockGetConfig: vi.fn(),
 }));
 
 vi.mock('../../restApiInstance.js', () => ({
@@ -29,21 +30,16 @@ vi.mock('../../restApiInstance.js', () => ({
   ),
 }));
 
-vi.mock('../../config.js', () => ({
-  getConfig: mocks.mockGetConfig,
-}));
-
 describe('getViewDataTool', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
+    stubDefaultEnvVars();
     resetResourceAccessCheckerSingleton();
-    mocks.mockGetConfig.mockReturnValue({
-      boundedContext: {
-        projectIds: null,
-        datasourceIds: null,
-        workbookIds: null,
-      },
-    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it('should create a tool instance with correct properties', () => {
@@ -59,6 +55,7 @@ describe('getViewDataTool', () => {
     mocks.mockQueryViewData.mockResolvedValue(mockViewData);
     const result = await getToolResult({ viewId: '4d18c547-bbb1-4187-ae5a-7f78b35adf2d' });
     expect(result.isError).toBe(false);
+    invariant(result.content[0].type === 'text');
     expect(result.content[0].text).toContain(
       'Country/Region,State/Province,Profit Ratio,Latitude (generated),Longitude (generated)',
     );
@@ -74,24 +71,20 @@ describe('getViewDataTool', () => {
     mocks.mockQueryViewData.mockRejectedValue(new Error(errorMessage));
     const result = await getToolResult({ viewId: '4d18c547-bbb1-4187-ae5a-7f78b35adf2d' });
     expect(result.isError).toBe(true);
+    invariant(result.content[0].type === 'text');
     expect(result.content[0].text).toContain(errorMessage);
   });
 
   it('should return view not allowed error when view is not allowed', async () => {
-    mocks.mockGetConfig.mockReturnValue({
-      boundedContext: {
-        projectIds: null,
-        datasourceIds: null,
-        workbookIds: new Set(['some-other-workbook-id']),
-      },
-    });
+    vi.stubEnv('INCLUDE_WORKBOOK_IDS', 'some-other-workbook-id');
     mocks.mockGetView.mockResolvedValue(mockView);
 
     const result = await getToolResult({ viewId: mockView.id });
     expect(result.isError).toBe(true);
+    invariant(result.content[0].type === 'text');
     expect(result.content[0].text).toBe(
       [
-        'The set of allowed workbooks that can be queried is limited by the server configuration.',
+        'The set of allowed views that can be queried is limited by the server configuration.',
         'The view with LUID 4d18c547-bbb1-4187-ae5a-7f78b35adf2d cannot be queried because it does not belong to an allowed workbook.',
       ].join(' '),
     );

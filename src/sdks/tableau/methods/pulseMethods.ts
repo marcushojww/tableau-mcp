@@ -2,7 +2,7 @@ import { Zodios } from '@zodios/core';
 import { Err, Ok, Result } from 'ts-results-es';
 import z from 'zod';
 
-import { isAxiosError } from '../../../utils/axios.js';
+import { AxiosRequestConfig, isAxiosError } from '../../../utils/axios.js';
 import { pulseApis } from '../apis/pulseApi.js';
 import { Credentials } from '../types/credentials.js';
 import { PulsePagination } from '../types/pagination.js';
@@ -27,8 +27,8 @@ import AuthenticatedMethods from './authenticatedMethods.js';
  * @link https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_pulse.htm
  */
 export default class PulseMethods extends AuthenticatedMethods<typeof pulseApis> {
-  constructor(baseUrl: string, creds: Credentials) {
-    super(new Zodios(baseUrl, pulseApis), creds);
+  constructor(baseUrl: string, creds: Credentials, axiosConfig: AxiosRequestConfig) {
+    super(new Zodios(baseUrl, pulseApis, { axiosConfig }), creds);
   }
 
   /**
@@ -189,7 +189,22 @@ export default class PulseMethods extends AuthenticatedMethods<typeof pulseApis>
   };
 }
 
-export type PulseDisabledError = 'tableau-server' | 'pulse-disabled';
+export type PulseDisabledErrorType = 'tableau-server' | 'pulse-disabled';
+
+export class PulseDisabledError extends Error {
+  readonly type: PulseDisabledErrorType;
+  readonly httpStatus: number;
+
+  constructor(type: PulseDisabledErrorType, httpStatus: number) {
+    super(
+      type === 'tableau-server' ? 'Pulse not available on Tableau Server' : 'Pulse is disabled',
+    );
+    this.name = 'PulseDisabledError';
+    this.type = type;
+    this.httpStatus = httpStatus;
+  }
+}
+
 export type PulseResult<T> = Result<T, PulseDisabledError>;
 async function guardAgainstPulseDisabled<T>(callback: () => Promise<T>): Promise<PulseResult<T>> {
   try {
@@ -197,7 +212,7 @@ async function guardAgainstPulseDisabled<T>(callback: () => Promise<T>): Promise
   } catch (error) {
     if (isAxiosError(error)) {
       if (error.response?.status === 404) {
-        return new Err('tableau-server');
+        return new Err(new PulseDisabledError('tableau-server', 404));
       }
 
       if (
@@ -206,7 +221,7 @@ async function guardAgainstPulseDisabled<T>(callback: () => Promise<T>): Promise
         error.response.headers.validation_code === '400999'
       ) {
         // ntbue-service-chassis/-/blob/main/server/interceptors/site_settings.go
-        return new Err('pulse-disabled');
+        return new Err(new PulseDisabledError('pulse-disabled', 400));
       }
     }
 
